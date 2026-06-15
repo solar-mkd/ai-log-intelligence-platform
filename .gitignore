@@ -17,3 +17,7 @@ desktop.ini
 # bulk raw data — ignored, but keep the folder present
 data/raw/*
 !data/raw/.gitkeep
+
+*.egg-info/
+build/
+dist/
