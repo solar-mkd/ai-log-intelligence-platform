@@ -1,0 +1,38 @@
+# LogLens — local PostgreSQL + pgvector database.
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down            (keeps data)
+# Reset:   docker compose down -v         (deletes data — fresh start)
+# Logs:    docker compose logs -f db
+#
+# The official pgvector image is a drop-in Postgres with the vector extension
+# already compiled in. The init script in ./db/init enables the extension the
+# first time the database is created, so no manual CREATE EXTENSION is needed.
+#
+# Credentials below are LOCAL DEV DEFAULTS only — fine for a local container,
+# never used for anything real. The application reads its connection string
+# from the LOGLENS_DB_DSN environment variable (see config/config.example.yaml):
+#   LOGLENS_DB_DSN=postgresql://loglens:loglens@localhost:5432/loglens
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: loglens-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: loglens
+      POSTGRES_PASSWORD: loglens
+      POSTGRES_DB: loglens
+    ports:
+      - "5432:5432"
+    volumes:
+      - loglens_pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loglens -d loglens"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  loglens_pgdata:

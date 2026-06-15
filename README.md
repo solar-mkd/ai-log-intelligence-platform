@@ -48,7 +48,19 @@ Two design choices set it apart from a typical RAG demo:
    RAG Q&A   +   Power BI (drill-down, filtering, slicing)
 ```
 
-> Diagrams (C4 context/container and Medallion data flow) live in [`/docs`](docs/). The full reasoning behind every decision below is in the **[Architecture Decision Records](docs/adr/ADRs.md)**.
+> Rendered diagrams (C4 container view and Medallion data flow) are in **[docs/architecture.md](docs/architecture.md)**. The reasoning behind every decision is in the **[Architecture Decision Records](docs/adr/ADRs.md)**.
+
+## Getting started
+
+**Prerequisites:** Docker and Python 3.11+.
+
+```bash
+git clone <your-repo-url>
+cd ai-log-intelligence-platform
+docker compose up -d        # starts PostgreSQL + pgvector
+```
+
+That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and (as it lands) running the pipeline — see **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Why it's built this way (design highlights)
 
@@ -63,30 +75,57 @@ This project leads with architecture; the code is the proof, not the point. The 
 - **Stateless, orchestrator-agnostic steps with GUID keys** — runs single-node today, designed to shard across nodes tomorrow. *(ADR-014)*
 - **Configurable per-field PII policy** — redact secrets, HMAC for privacy-preserving correlation, encrypt where reversibility is required. *(ADR-015)*
 
-Read the full set: **[docs/adr/adrs.md](docs/adr/adrs.md)**.
+Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 
 ## Tech stack
 
 | Concern | Choice |
 |---|---|
-| Language | Python |
-| Store (relational + vector) | PostgreSQL + pgvector |
+| Language | Python 3.11+ |
+| Store (relational + vector) | PostgreSQL + pgvector (via Docker) |
 | Similarity search | pgvector (`<=>` cosine), HNSW index, hybrid metadata filtering |
 | Embeddings | Local embedding model (pinned + versioned) |
 | Generation | Local LLM (swappable, e.g. Mistral / Llama via Ollama) |
 | BI | Power BI (downstream consumer of the gold layer) |
-| Demo store | SQLite-compatible path for zero-setup local runs |
 
 **Platform-agnostic by design.** Core logic is kept storage- and scheduler-agnostic behind clean boundaries, so the same Medallion model maps directly onto Delta Lake + Unity Catalog on Databricks, or equivalent services on AWS — PostgreSQL + pgvector is the reference implementation, not a lock-in.
+
+## Repository layout
+
+```
+.
+├── config/              # configuration (config.example.yaml; real config git-ignored)
+├── data/
+│   ├── raw/             # bulk local data (git-ignored)
+│   └── sample/          # small committed sample data
+├── db/init/             # database init scripts (enables pgvector on first start)
+├── docs/
+│   ├── SETUP.md         # how to run it
+│   ├── architecture.md  # C4 + Medallion diagrams
+│   └── adr/ADRs.md      # architecture decision records
+├── src/loglens/
+│   ├── parsers/         # pluggable parser contract + registry + per-type parsers
+│   ├── pipeline/        # bronze / silver / gold steps
+│   ├── storage/         # storage adapter boundary (PostgreSQL + pgvector)
+│   └── retrieval/       # hybrid retrieval + local LLM
+├── tools/               # developer utilities (synthetic log generator)
+├── tests/
+└── docker-compose.yml   # local PostgreSQL + pgvector
+```
 
 ## Status
 
 This is an evolving reference build.
 
-- **Built / in progress:** Windows service log ingestion → silver → exception segmentation → embeddings → RAG query (the first end-to-end vertical slice).
+- **Done:** project scaffold (parser contract, registry, pipeline/storage stubs), synthetic Windows-service log generator, PostgreSQL + pgvector database via Docker, full architecture documentation.
+- **In progress:** the first end-to-end vertical slice — Windows service logs through bronze → silver → exception segmentation → embeddings → a working RAG query.
 - **Designed for, not yet built:** additional log types (Apache, HDFS, EVTX), Power BI dashboards, distributed multi-node execution.
 
 The system is deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.
+
+## Test data
+
+A synthetic log generator under [`tools/`](tools/) produces realistic Windows service (.NET) logs with recurring exception families, optional correlated incident bursts, and optional synthetic PII fields — so the platform's retrieval and correlation features have structured data to work against. All generated data is synthetic and safe to commit. See **[tools/README.md](tools/README.md)**.
 
 ## Configuration & secrets
 
