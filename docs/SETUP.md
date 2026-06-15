@@ -1,8 +1,8 @@
 # Setup
 
 How to get LogLens running locally, from cloning the repository to a working
-database. The pipeline steps will be added to this guide as they come online;
-for now this covers the environment and the PostgreSQL + pgvector database.
+database with the schema applied. The remaining pipeline steps will be added to
+this guide as they come online.
 
 > For *what* the system is and *why* it is built this way, see the
 > [README](../README.md), [architecture](architecture.md), and
@@ -38,7 +38,7 @@ docker compose up -d
 The first run downloads the `pgvector/pgvector` image (one-time, ~150 MB) and
 starts a Postgres container named `loglens-db`. An init script enables the
 `vector` extension automatically the first time the database is created, so no
-further database setup is needed.
+further database installation is needed.
 
 Check it is running and healthy:
 
@@ -58,7 +58,7 @@ docker exec -it loglens-db psql -U loglens -d loglens \
 
 This should print a version number (e.g. `0.8.2`). If it returns no rows, the
 init script did not run — recreate the database with `docker compose down -v`
-then `docker compose up -d` (see *Resetting* below).
+then `docker compose up -d` (see *Managing the database* below).
 </details>
 
 ### Managing the database
@@ -75,6 +75,9 @@ reset command when you want a clean database (for example after schema changes).
 
 ## 3. Set up the Python environment
 
+Create and activate a virtual environment, then install the dependencies **and**
+the project itself:
+
 ```bash
 # from the repository root
 python -m venv .venv
@@ -84,7 +87,26 @@ python -m venv .venv
 #   Windows (cmd):         .venv\Scripts\activate.bat
 #   macOS/Linux:           source .venv/bin/activate
 
-pip install -r requirements.txt
+pip install -r requirements.txt   # third-party dependencies
+pip install -e .                  # install the loglens package (editable)
+```
+
+The `pip install -e .` step installs the project's own `loglens` package into
+the environment in editable mode. This is required for `import loglens` to work
+outside of the test runner (the package lives under `src/`), and edits to the
+source take effect immediately without reinstalling.
+
+> **Activate the venv at the start of every session.** Each new terminal starts
+> on the system Python; re-run the activate command above. When the venv is
+> active your prompt shows `(.venv)`. In VS Code, select the `.venv` interpreter
+> (Command Palette → *Python: Select Interpreter*) and integrated terminals
+> activate it automatically.
+
+Verify the environment:
+
+```bash
+python -c "import sys; print(sys.executable)"   # should point inside .venv
+python -c "import psycopg; print(psycopg.__version__)"
 ```
 
 ## 4. Configure the application
@@ -111,7 +133,30 @@ $env:LOGLENS_DB_DSN="postgresql://loglens:loglens@localhost:5432/loglens"
 `docker-compose.yml`. They are not secrets and are only used by the local
 container.)
 
-## 5. Generate sample log data
+Confirm the application can reach the database and that pgvector is enabled:
+
+```bash
+python -c "from loglens.storage.postgres import check_connection; print(check_connection())"
+```
+
+This should print the server and pgvector versions, e.g.
+`{'server_version': '17.x', 'pgvector_version': '0.8.2'}`.
+
+## 5. Apply the database schema
+
+With the database running and `LOGLENS_DB_DSN` set, create the tables:
+
+```bash
+python -m loglens.init_db
+```
+
+You should see each schema file being applied, ending with
+`Done. Schema is up to date.` This step is **idempotent** — it uses
+`IF NOT EXISTS` throughout, so it is safe to run again after pulling schema
+changes. (To verify, you can inspect the tables in any SQL client, or run
+`docker exec -it loglens-db psql -U loglens -d loglens -c "\dt"`.)
+
+## 6. Generate sample log data
 
 The repository includes a small committed sample under `data/sample`. To
 generate more (for example, a larger local set for testing):
@@ -122,6 +167,15 @@ python tools/generate_windows_logs.py --output_dir data/raw --incidents --pii
 
 See [tools/README.md](../tools/README.md) for all generator options. Note that
 `data/raw` is git-ignored (for bulk data); `data/sample` is committed.
+
+## 7. Run the tests
+
+```bash
+pytest tests/ -v
+```
+
+The database-dependent tests run only when `LOGLENS_DB_DSN` is set; otherwise
+they skip, so the suite stays green without a database.
 
 ---
 
@@ -145,6 +199,14 @@ accordingly.
 
 **pgvector extension missing.** The init script only runs on a fresh database.
 Reset with `docker compose down -v` then `docker compose up -d`.
+
+**`ModuleNotFoundError: No module named 'loglens'`.** The project package is not
+installed in the active environment. Activate the venv and run `pip install -e .`
+(see step 3).
+
+**`LOGLENS_DB_DSN is not set`.** The connection string environment variable is
+missing in the current terminal. Set it (see step 4); it only lasts for the
+current terminal session.
 
 **Cannot connect from Python.** Confirm the container is healthy
 (`docker compose ps`) and that `LOGLENS_DB_DSN` matches the host, port, user,

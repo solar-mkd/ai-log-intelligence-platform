@@ -21,3 +21,5 @@ data/raw/*
 *.egg-info/
 build/
 dist/
+
+helper.txt
