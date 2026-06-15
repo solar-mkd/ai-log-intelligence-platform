@@ -1,0 +1,12 @@
+# Core
+pyyaml>=6.0
+
+# Storage (PostgreSQL + pgvector) — reference implementation
+psycopg[binary]>=3.1
+pgvector>=0.2
+
+# Embeddings / LLM (local) — pin actual versions when wired
+# ollama>=0.1
+
+# Dev
+pytest>=8.0

@@ -63,7 +63,7 @@ This project leads with architecture; the code is the proof, not the point. The 
 - **Stateless, orchestrator-agnostic steps with GUID keys** — runs single-node today, designed to shard across nodes tomorrow. *(ADR-014)*
 - **Configurable per-field PII policy** — redact secrets, HMAC for privacy-preserving correlation, encrypt where reversibility is required. *(ADR-015)*
 
-Read the full set: **[docs/adr/adr.md](docs/adr/adr.md)**.
+Read the full set: **[docs/adr/adrs.md](docs/adr/adrs.md)**.
 
 ## Tech stack
 
