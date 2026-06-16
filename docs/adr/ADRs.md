@@ -245,6 +245,24 @@ The mechanism is built once; behaviour is data-driven per field.
 
 ---
 
+## ADR-016 — Layer state isolation (each layer depends only on its own state)
+
+**Status:** Accepted
+
+**Context.** The Medallion layers (bronze, silver, gold) are built as stateless, orchestrator-agnostic steps (ADR-014) that may, in future, run on separate nodes — and potentially against separate databases — so that, for example, one node ingests Windows logs into bronze, another ingests Apache logs, and a third moves data from bronze to silver. For this to be possible, no layer's logic may depend on reading another layer's data.
+
+A concrete case forces the decision. On the *first* ingestion of a source, "process every file not yet processed" would sweep in the entire history of a shared location (which may hold many years of logs), most of which is unwanted. A cutoff is needed to bound that initial import — but only on the first run. The question is how a layer detects "this is a fresh source" without coupling to a downstream layer.
+
+**Decision.** Each layer's logic reads **only its own state**, never a downstream layer's data. Specifically, the bronze ingestion detects a fresh source by checking whether `bronze_processed_logs` (bronze's own control table) has any prior rows for that source. If it has none, the source is treated as a first import and the per-source cutoff (`earliest_date` in config) is applied to bound it; if it has history, ingestion proceeds normally and processes all missing files. Bronze never inspects silver (or gold) to make this — or any other — decision.
+
+**Alternatives considered.**
+- *Detect a fresh source by checking whether the silver layer is empty for that source.* Rejected: this couples bronze to silver. If silver lived in a separate database or on a separate node, bronze would need cross-layer access purely to make an ingestion decision — exactly the dependency this architecture aims to avoid.
+- *A separate `initial_import` script distinct from ongoing ingestion.* Rejected: it duplicates discovery/landing logic across two code paths and still needs a rule for when to run; folding the cutoff into normal ingestion (gated on bronze's own state) achieves the same outcome with one path.
+
+**Consequences.** Layers are decoupled to the point of being physically separable — they can run on different nodes and even against different databases, communicating only through their own persisted state. This enables independent scaling and distribution per layer and per log type (consistent with ADR-014). The cost is that each layer must carry enough of its own state to make its decisions locally: bronze's control table must record processing history per source so "fresh vs. ongoing" is answerable from bronze alone. This is a deliberate, acceptable trade — a small amount of per-layer bookkeeping in exchange for full layer independence.
+
+---
+
 ## Decisions intentionally deferred
 
 These do not block the initial build and will be decided during implementation:

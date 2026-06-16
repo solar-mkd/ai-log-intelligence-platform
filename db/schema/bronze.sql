@@ -86,3 +86,27 @@ CREATE TABLE IF NOT EXISTS bronze_archive (
 
     CONSTRAINT uq_archive_entry UNIQUE (processed_log_id, entry_hash)
 );
+
+
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS bronze_runs (
+    id                        UUID PRIMARY KEY,          -- app-generated (uuid4)
+    source_id                 TEXT        NOT NULL,
+    location                  TEXT        NOT NULL,       -- file_path read from
+    run_host                  TEXT,                       -- hostname / node
+    status                    TEXT        NOT NULL
+                              DEFAULT 'in_progress'
+                              CHECK (status IN ('in_progress', 'completed', 'failed')),
+    files_seen                INTEGER     NOT NULL DEFAULT 0,
+    files_processed           INTEGER     NOT NULL DEFAULT 0,
+    files_skipped_unchanged   INTEGER     NOT NULL DEFAULT 0,
+    files_failed              INTEGER     NOT NULL DEFAULT 0,
+    entries_landed            INTEGER     NOT NULL DEFAULT 0,
+    entries_skipped_duplicate INTEGER     NOT NULL DEFAULT 0,
+    started_utc               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_utc              TIMESTAMPTZ,                -- null until the run ends
+    duration_seconds          NUMERIC                     -- null until the run ends
+);
+
+CREATE INDEX IF NOT EXISTS ix_runs_source
+    ON bronze_runs (source_id, started_utc DESC);
