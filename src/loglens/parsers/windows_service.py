@@ -1,106 +1,201 @@
-"""Windows service log parser (the first vertical slice).
+"""Windows service (.NET) log parser (ADR-004, ADR-005, ADR-006, ADR-007).
 
-This is the first concrete implementation of the parser contract (ADR-004).
-It self-registers under the ``windows_service`` log type. The structural
-extraction logic here is a scaffold — the working extraction you already have
-drops into ``parse`` and ``_segment_exception``.
+Parses one raw multi-line Windows service log entry into the structured fields
+the silver layer stores. The extraction approach is the proven one from the
+original proof-of-concept:
 
-Responsibilities specific to this parser:
-- Promote the fields most often searched into the normalized core; everything
-  else goes into ``extra_fields`` (ADR-005).
-- Map Windows-native severity onto the common vocabulary (ADR-006).
-- Reassembly of multi-line exceptions happens upstream (one entry arrives
-  whole); segmentation into structure-aware chunks is a gold-layer concern
-  (ADR-009, ADR-010) and lives in the gold step, not here.
+  * the header line carries the timestamp, level, and the namespace/message;
+  * indented "  key : value" lines form the body;
+  * an "Exception"/"Stack Trace" section is reassembled as one block.
+
+This parser self-registers under the "windows_service" log_type (ADR-004).
+It maps into the common silver shape (ADR-005): universal fields become
+columns, everything else (body key-values) goes to extra_fields, and the PII
+policy is applied via a single hook (currently pass-through; ADR-015).
 """
 
 from __future__ import annotations
 
-import hashlib
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .contract import ParsedEntry
 from .registry import register
 
+PARSER_VERSION = "windows_service/1.0"
 
-# Map Windows event levels onto the common severity vocabulary (ADR-006).
+# Header: "M/D/YYYY H:MM:SS AM  Level: <namespace/message...>"
+# Capture timestamp, level, and the remainder (namespace + message text).
+_HEADER_RE = re.compile(
+    r"^(?P<ts>\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2} (?:AM|PM))\s+"
+    r"(?P<level>\w+):\s*(?P<rest>.*)$"
+)
+
+# Body key/value line: at least two leading spaces, "key : value".
+_KV_RE = re.compile(r"^\s{2,}([^:]+?)\s*:\s*(.*)$")
+
+# A leading namespace token in the header remainder, e.g.
+# "Contoso.Platform.Inventory.ServiceLayer.Tasks.SyncInventoryBalanceTask ..."
+_NAMESPACE_RE = re.compile(r"^([A-Za-z_][\w.]*\.[\w.]+)")
+
+# Windows native level -> normalized severity (ADR-006).
 _SEVERITY_MAP = {
     "Critical": "FATAL",
     "Error": "ERROR",
     "Warning": "WARN",
     "Information": "INFO",
     "Verbose": "DEBUG",
+    "Debug": "DEBUG",
 }
+
+# Body keys that indicate the start of an exception block. Once seen, all
+# following lines are appended to the exception text.
+_EXCEPTION_KEYS = {"Exception", "Exception Type", "Stack Trace"}
+
+# Known body key/value fields that may appear AFTER an exception block. When one
+# of these is seen, it ends the exception capture and resumes normal key/value
+# handling — so trailing fields (e.g. PII like User/Country/Account Id) are not
+# swallowed into exception_text. Compared case-insensitively.
+_TRAILING_BODY_KEYS = {
+    "user", "country", "account id", "duration", "status", "time taken",
+    "worker type", "queue name", "queue depth", "affected count",
+    "unique data sources", "deleted count", "modified count", "new count",
+    "detail", "warning",
+}
+
+
+@dataclass
+class ParsedEntry:
+    """Structured result of parsing one raw entry, mapped to the silver shape.
+
+    Fields the parser could not determine are left as None; the silver columns
+    are nullable so a partially-parseable entry still lands (ELT tolerance).
+    """
+    event_time_local: datetime | None = None
+    severity: str = "UNKNOWN"
+    severity_raw: str | None = None
+    logger: str | None = None
+    message: str | None = None
+    is_exception: bool = False
+    exception_text: str | None = None
+    extra_fields: dict[str, Any] = field(default_factory=dict)
+    parser_version: str = PARSER_VERSION
+
+
+def _normalize_severity(level_raw: str) -> str:
+    return _SEVERITY_MAP.get(level_raw, "UNKNOWN")
 
 
 @register
 class WindowsServiceParser:
-    """Parses Windows service log entries into the common ``ParsedEntry`` shape."""
+    """Parses Windows service entries into the common ParsedEntry shape."""
 
     log_type = "windows_service"
 
     def parse(self, raw_entry: str, source_config: dict[str, Any]) -> ParsedEntry:
-        source_id = source_config["source_id"]
-        source_file = source_config.get("_current_file", "")
-        tz_name = source_config["timezone"]            # IANA zone (ADR-007)
-        tz = ZoneInfo(tz_name)
+        lines = raw_entry.splitlines()
+        if not lines:
+            return ParsedEntry()
 
-        # --- entry hash for idempotency (ADR-003) ---
-        entry_hash = hashlib.sha256(raw_entry.encode("utf-8")).hexdigest()
+        result = ParsedEntry()
 
-        # --- TODO: real structural extraction (your existing logic) ---
-        # The block below is a placeholder shape. Replace with the working
-        # field extraction: pull the timestamp, level, message, and the
-        # important key/value pairs; put the rest in extra_fields.
-        local_naive = self._extract_timestamp(raw_entry)        # naive local dt
-        event_time_local = local_naive.replace(tzinfo=tz)
-        event_time_utc = event_time_local.astimezone(ZoneInfo("UTC"))
+        # --- header line ---
+        header = lines[0]
+        m = _HEADER_RE.match(header.strip())
+        if m:
+            result.event_time_local = self._parse_timestamp(m.group("ts"))
+            result.severity_raw = m.group("level")
+            result.severity = _normalize_severity(m.group("level"))
+            rest = m.group("rest").strip()
+            # split the remainder into logger (namespace) + message text
+            ns = _NAMESPACE_RE.match(rest)
+            if ns:
+                result.logger = ns.group(1)
+                result.message = rest[ns.end():].strip() or None
+            else:
+                result.message = rest or None
+        else:
+            # Unparseable header: keep the line as the message, stay tolerant.
+            result.message = header.strip() or None
 
-        severity_raw = self._extract_level(raw_entry)
-        severity = _SEVERITY_MAP.get(severity_raw, "UNKNOWN")
+        # --- body: key/values + exception block ---
+        # Body key/values (before any exception block) are promoted to extra.
+        # Once the exception block starts, the remaining lines are captured
+        # VERBATIM (original text, only right-stripped) so the exception's
+        # natural structure is preserved for gold's structure-aware chunking.
+        extra: dict[str, Any] = {}
+        exception_parts: list[str] = []
+        in_exception = False
+        last_key: str | None = None
 
-        message = self._extract_message(raw_entry)
-        is_exception, exception_text = self._extract_exception(raw_entry)
+        for line in lines[1:]:
+            if in_exception:
+                # A known body field (e.g. trailing PII) ends the exception
+                # block and resumes normal key/value handling, so such fields
+                # are not swallowed into exception_text.
+                kv = _KV_RE.match(line)
+                if kv and kv.group(1).strip().lower() in _TRAILING_BODY_KEYS:
+                    in_exception = False
+                    key = kv.group(1).strip()
+                    value = kv.group(2).strip()
+                    extra[key] = value
+                    last_key = key
+                    continue
+                # otherwise this line is part of the exception, captured verbatim
+                exception_parts.append(line.rstrip())
+                continue
 
-        extra_fields = self._extract_extra(raw_entry)           # everything else
+            kv = _KV_RE.match(line)
+            if kv:
+                key = kv.group(1).strip()
+                value = kv.group(2).strip()
+                if key in _EXCEPTION_KEYS:
+                    in_exception = True
+                    exception_parts.append(line.rstrip())  # verbatim from the start
+                    last_key = key
+                else:
+                    extra[key] = value
+                    last_key = key
+            elif last_key is not None and last_key in extra:
+                # continuation of a normal key/value
+                extra[last_key] = f"{extra[last_key]}\n{line.strip()}"
 
-        return ParsedEntry(
-            entry_hash=entry_hash,
-            source_id=source_id,
-            log_type=self.log_type,
-            source_file=source_file,
-            event_time_utc=event_time_utc,
-            event_time_local=event_time_local,
-            source_timezone=tz_name,
-            severity=severity,
-            severity_raw=severity_raw,
-            message=message,
-            is_exception=is_exception,
-            exception_text=exception_text,
-            extra_fields=extra_fields,
-        )
+        if exception_parts:
+            result.is_exception = True
+            result.exception_text = "\n".join(exception_parts).strip()
 
-    # --- extraction helpers (stubs — drop your working logic in) ------------
+        # PII policy hook (ADR-015): currently pass-through. Later this will
+        # redact / HMAC / encrypt configured fields before they enter silver.
+        result.extra_fields = _apply_pii_policy(extra, source_config)
 
-    def _extract_timestamp(self, raw_entry: str) -> datetime:
-        # TODO: parse the real timestamp from the entry.
-        raise NotImplementedError("plug in timestamp extraction")
+        return result
 
-    def _extract_level(self, raw_entry: str) -> str:
-        # TODO: return the Windows-native level string, e.g. "Error".
-        raise NotImplementedError("plug in level extraction")
+    def _parse_timestamp(self, ts: str) -> datetime | None:
+        """Parse 'M/D/YYYY H:MM:SS AM' into a naive local datetime."""
+        for fmt in ("%m/%d/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M:%S %p"):
+            try:
+                return datetime.strptime(ts, fmt)
+            except ValueError:
+                continue
+        return None
 
-    def _extract_message(self, raw_entry: str) -> str:
-        # TODO: return the primary human-readable message.
-        raise NotImplementedError("plug in message extraction")
 
-    def _extract_exception(self, raw_entry: str) -> tuple[bool, str | None]:
-        # TODO: detect whether this entry is an exception and return the full
-        # reassembled exception text. Segmentation happens later, in gold.
-        return (False, None)
+def _apply_pii_policy(fields: dict[str, Any], source_config: dict[str, Any]) -> dict[str, Any]:
+    """PII policy hook (ADR-015).
 
-    def _extract_extra(self, raw_entry: str) -> dict[str, Any]:
-        # TODO: return all parsed-but-not-promoted key/value pairs (ADR-005).
-        return {}
+    Currently a pass-through: returns fields unchanged. This is the single place
+    the per-field policy (redact / HMAC / encrypt) will be applied later, reading
+    the policy from source_config['pii_policy']. Building the seam now keeps the
+    later change localized to this function.
+    """
+    return fields
+
+
+def to_utc(local_dt: datetime | None, tz_name: str) -> datetime | None:
+    """Convert a naive local datetime to UTC using an IANA zone (ADR-007)."""
+    if local_dt is None:
+        return None
+    local_aware = local_dt.replace(tzinfo=ZoneInfo(tz_name))
+    return local_aware.astimezone(ZoneInfo("UTC"))

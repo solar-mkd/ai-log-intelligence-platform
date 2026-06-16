@@ -24,6 +24,7 @@ from .storage.postgres import connect, get_dsn, StorageError
 # (e.g. "silver.sql", "gold.sql").
 SCHEMA_FILES = [
     "bronze.sql",
+    "silver.sql",
 ]
 
 

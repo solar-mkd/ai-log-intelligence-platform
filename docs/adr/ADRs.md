@@ -263,6 +263,24 @@ A concrete case forces the decision. On the *first* ingestion of a source, "proc
 
 ---
 
+## ADR-017 — Single database schema with layer-prefixed table names
+
+**Status:** Accepted
+
+**Context.** The Medallion layers (bronze, silver, gold) need to be distinguishable and organized within the database. A common approach is to put each layer in its own PostgreSQL schema (namespace) — `bronze.*`, `silver.*`, `gold.*` — which is justified mainly when layers have different security/access boundaries, or when strong namespace isolation is required.
+
+In this system there is no security boundary between layers: the same application role reads and writes across all of them, and there is no requirement to grant different access per layer.
+
+**Decision.** Use a single PostgreSQL schema (`public`) and distinguish layers by a **table-name prefix convention**: `bronze_processed_logs`, `bronze_landing`, `bronze_archive`, `bronze_runs`, `silver_log_entries`, and so on. The prefix makes each table's layer obvious and groups tables visually, without introducing separate schemas.
+
+**Alternatives considered.**
+- *A separate PostgreSQL schema per layer (`bronze`, `silver`, `gold`).* Rejected for this system: its primary justification — per-layer security/access boundaries — does not apply, and the organizational clarity it provides is already achieved by the table-name prefix convention. Separate schemas would add schema-qualified names, search-path management, and extra setup for no benefit here. (Were the project started fresh with different constraints — e.g. distinct access roles per layer — separate schemas would be reconsidered.)
+- *Separate databases per layer.* Not relevant at this stage; if layers ever need physical separation (ADR-016), that separation would more naturally be separate databases or instances than separate schemas within one database.
+
+**Consequences.** Simpler queries and code (no schema qualification), simpler setup, and clear layer grouping via naming. The trade-off is that layer separation is a *convention* (enforced by discipline in naming) rather than a *structural* boundary; this is acceptable given there is no security or isolation requirement driving a structural split. If a future requirement introduces per-layer access control, this decision would be revisited via a superseding ADR.
+
+---
+
 ## Decisions intentionally deferred
 
 These do not block the initial build and will be decided during implementation:
