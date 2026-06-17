@@ -172,3 +172,26 @@ def _print_summary(r: TransformResult) -> None:
         f"  entries duplicate : {r.entries_skipped_duplicate}\n"
         f"  entries failed    : {r.entries_failed}"
     )
+
+
+def main(argv=None) -> int:
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Transform a source's undigested bronze entries into the silver layer.",
+    )
+    p.add_argument("--source-id", required=True, help="Identifier for the source to transform.")
+    p.add_argument("--log-type", default="windows_service", help="Parser/log type. Default: windows_service")
+    p.add_argument("--timezone", default="UTC", help="IANA timezone of the source (e.g. Australia/Brisbane).")
+    args = p.parse_args(argv)
+
+    transform_to_silver({
+        "source_id": args.source_id,
+        "log_type": args.log_type,
+        "timezone": args.timezone,
+    })
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

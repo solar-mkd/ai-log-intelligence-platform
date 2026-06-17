@@ -84,6 +84,23 @@ class ParsedEntry:
     parser_version: str = PARSER_VERSION
 
 
+
+# Segmentation: the inner-exception marker and the .NET signature line pattern.
+_INNER_MARKER = "--->"
+_SIGNATURE_RE = re.compile(
+    r"^(?P<type>[A-Za-z_][\w.]*(?:Exception|Error))\s*:\s*(?P<msg>.*)$"
+)
+
+
+@dataclass
+class ExceptionSegment:
+    """One segment of a segmented exception. Every parser's segmenter returns a
+    list of these, keeping gold.py system-agnostic."""
+    segment_index: int
+    segment_type: str       # 'signature' (outer) | 'inner_signature'
+    segment_text: str       # embeddable text: "Type: message"
+
+
 def _normalize_severity(level_raw: str) -> str:
     return _SEVERITY_MAP.get(level_raw, "UNKNOWN")
 
@@ -180,6 +197,33 @@ class WindowsServiceParser:
             except ValueError:
                 continue
         return None
+
+
+    def segment_exception(self, exception_text: str) -> "list[ExceptionSegment]":
+        """Split a .NET exception into SIGNATURE segments — one per exception in
+        the inner-exception chain (ADR-009, ADR-010). The signature (type +
+        message) is the recurring, embeddable unit; stack frames are not emitted
+        as separate segments (they create false similarity) and remain in
+        silver's exception_text. Deduplicated and idempotent: a signature that
+        appears both in the Type/Message block and at the head of the stack
+        trace is emitted once. Outer = index 0; inner exceptions follow."""
+        if not exception_text:
+            return []
+        segments: list[ExceptionSegment] = []
+        idx = 0
+        for raw_line in exception_text.splitlines():
+            line = raw_line.strip()
+            for part in line.split(_INNER_MARKER):
+                m = _SIGNATURE_RE.match(part.strip())
+                if not m:
+                    continue
+                text = f"{m.group('type')}: {m.group('msg')}".strip()
+                if any(s.segment_text == text for s in segments):
+                    continue
+                seg_type = "signature" if idx == 0 else "inner_signature"
+                segments.append(ExceptionSegment(idx, seg_type, text))
+                idx += 1
+        return segments
 
 
 def _apply_pii_policy(fields: dict[str, Any], source_config: dict[str, Any]) -> dict[str, Any]:

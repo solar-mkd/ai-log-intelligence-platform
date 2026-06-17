@@ -326,3 +326,45 @@ def _coerce_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+
+# --- append this block to the END of src/loglens/pipeline/landing_bronze.py ---
+
+def _build_source_config(args) -> dict:
+    cfg = {
+        "source_id": args.source_id,
+        "log_type": args.log_type,
+        "location": args.location,
+    }
+    if args.file_prefix:
+        cfg["file_prefix"] = args.file_prefix
+    if args.timezone:
+        cfg["timezone"] = args.timezone
+    if args.header_pattern:
+        cfg["header_pattern"] = args.header_pattern
+    if args.earliest_date:
+        cfg["earliest_date"] = args.earliest_date
+    return cfg
+
+
+def main(argv=None) -> int:
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Ingest a source's log files into the bronze landing table.",
+    )
+    p.add_argument("--source-id", required=True, help="Identifier for this source.")
+    p.add_argument("--log-type", default="windows_service", help="Parser/log type. Default: windows_service")
+    p.add_argument("--location", required=True, help="Directory containing the log files.")
+    p.add_argument("--file-prefix", default=None, help="Filename prefix filter. Default: log")
+    p.add_argument("--timezone", default=None, help="IANA timezone of the source (e.g. Australia/Brisbane).")
+    p.add_argument("--header-pattern", default=None, help="Override the header regex for entry splitting.")
+    p.add_argument("--earliest-date", default=None, help="YYYY-MM-DD cutoff applied only on a first import.")
+    args = p.parse_args(argv)
+
+    ingest_to_bronze(_build_source_config(args))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

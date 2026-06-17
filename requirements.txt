@@ -10,3 +10,6 @@ pgvector>=0.2
 
 # Dev
 pytest>=8.0
+
+# ML
+sentence-transformers>=5.6
