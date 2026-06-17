@@ -1,6 +1,6 @@
 # LogLens — AI Log Intelligence Platform
 
-*An architecture-led reference platform for diagnosing errors and exceptions across heterogeneous systems, using a governed Medallion data pipeline and local Retrieval-Augmented Generation (RAG).*
+*An architecture-led platform for diagnosing errors and exceptions across heterogeneous systems, using a governed Medallion data pipeline and local Retrieval-Augmented Generation (RAG).*
 
 ---
 
@@ -10,7 +10,7 @@ When something fails in a complex environment, the evidence is scattered. The sa
 
 > *"When did this error first appear, and what was happening in the other systems around that time?"*
 
-Answering it normally means manually grepping several log stores, mentally normalizing timestamps, and eyeballing correlations. LogLens is built to answer questions like this directly — by ingesting logs from any system into a common, governed model, and letting an LLM retrieve semantically and temporally relevant evidence across all of them.
+Answering it normally means manually grepping several log stores, mentally normalizing timestamps, and eyeballing correlations. LogLens answers questions like this directly — by ingesting logs from any system into a common, governed model, and letting an LLM retrieve semantically and temporally relevant evidence across all of them.
 
 ## The idea
 
@@ -18,8 +18,25 @@ LogLens ingests heterogeneous logs into a **Medallion architecture** (bronze →
 
 Two design choices set it apart from a typical RAG demo:
 
-- **Structure-aware chunking.** Instead of cutting documents into fixed-size chunks with overlap (the common default), LogLens chunks on the *natural structure of an exception* — one embedding per exception segment, because the segment is the natural unit of meaning. This produces far more precise retrieval for diagnostics.
-- **Cross-system temporal correlation.** Retrieval is **hybrid**: filter by a time window and source, then rank by semantic similarity. Vector similarity alone cannot answer "what happened elsewhere around that time" — that's a temporal join across normalized, heterogeneous sources, designed in as a first-class concern.
+- **Structure-aware chunking.** Instead of cutting documents into fixed-size chunks with overlap (the common default), LogLens chunks on the *natural structure of an exception* — one embedding per exception signature, following the inner-exception chain, because that signature is the natural unit of *recurrence*. Similar errors from anywhere in the estate land near each other in vector space; shared-but-irrelevant stack frames don't create false matches. This produces far more precise retrieval for diagnostics.
+- **Cross-system temporal correlation.** Retrieval is **hybrid**: filter by a time window, source, and severity, then rank by semantic similarity. Vector similarity alone cannot answer "what happened elsewhere around that time" — that's a temporal join across normalized, heterogeneous sources, designed in as a first-class concern.
+
+## It works end-to-end
+
+Ask a plain-English question; get an answer grounded in your actual log data — retrieved semantically, with real occurrence counts and time spans, and no hallucinated specifics:
+
+```
+$ python -m loglens.pipeline.ask_gold "what database errors are happening and how often?"
+
+The database errors primarily involve connection timeouts from
+System.Data.SqlClient.SqlException, across three timeout periods:
+60000ms (142 occurrences), 30000ms (126), and 15000ms (121). There are
+also deadlock errors from SqlException (several occurrences over the
+period), and one Microsoft.EntityFrameworkCore.DbUpdateException
+(753 occurrences).
+```
+
+The answer is generated *only* from segments the retrieval layer surfaced — the model is explicitly instructed to answer from that context and to decline when it lacks the information, so responses stay grounded in real data rather than invented.
 
 ## Architecture at a glance
 
@@ -28,31 +45,32 @@ Two design choices set it apart from a typical RAG demo:
         │
         ▼
    ┌──────────┐   raw entries, hash-based idempotency, audit trail
-   │  BRONZE  │   landing → archive, processed-logs control table
+   │  BRONZE  │   landing (+ archive by design), processed-logs control table,
+   │          │   per-run observability (bronze_runs)
    └──────────┘
         │
         ▼
    ┌──────────┐   parsed & normalized entries
    │  SILVER  │   universal columns + JSON overflow
    │          │   UTC time (IANA zones), normalized + raw severity
-   │          │   per-field PII policy (redact / HMAC / encrypt)
+   │          │   exceptions isolated; per-field PII policy (hook in place)
    └──────────┘
         │
         ▼
-   ┌──────────┐   reassembled exceptions → segments
-   │   GOLD   │   structure-aware chunks → embeddings (model-pinned)
-   │          │   PostgreSQL + pgvector  →  hybrid retrieval  →  local LLM
+   ┌──────────┐   exceptions → structure-aware signature segments
+   │   GOLD   │   segments → embeddings (model-pinned, separate table)
+   │          │   PostgreSQL + pgvector  →  hybrid retrieval  →  local LLM (RAG)
    └──────────┘
         │
         ▼
-   RAG Q&A   +   Power BI (drill-down, filtering, slicing)
+   RAG Q&A (working)   +   Power BI (drill-down, filtering, slicing — planned)
 ```
 
 > Rendered diagrams (C4 container view and Medallion data flow) are in **[docs/architecture.md](docs/architecture.md)**. The reasoning behind every decision is in the **[Architecture Decision Records](docs/adr/ADRs.md)**.
 
 ## Getting started
 
-**Prerequisites:** Docker and Python 3.11+.
+**Prerequisites:** Docker, Python 3.11+, and (for the RAG layer) [Ollama](https://ollama.com) with a local model pulled (e.g. `ollama pull mistral`).
 
 ```bash
 git clone <your-repo-url>
@@ -60,19 +78,23 @@ cd ai-log-intelligence-platform
 docker compose up -d        # starts PostgreSQL + pgvector
 ```
 
-That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and (as it lands) running the pipeline — see **[docs/SETUP.md](docs/SETUP.md)**.
+That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and running the pipeline end-to-end (ingest → silver → segment → embed → retrieve → ask) — see **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Why it's built this way (design highlights)
 
 This project leads with architecture; the code is the proof, not the point. The decisions that matter are captured as ADRs — a few of the notable ones:
 
 - **Medallion layering with audit-first lineage** — raw fidelity, clean structure, and analytical products kept separate, each layer independently re-runnable. *(ADR-001, ADR-002)*
+- **ELT, not ETL, at the boundary** — bronze lands raw entries with minimal transformation, so ingestion almost never fails; shaping happens downstream. *(ADR-001/002)*
 - **Hash-based idempotency** at entry and file level — safe re-runs, correct handling of rotated logs. *(ADR-003)*
-- **Pluggable parser contract** — adding a new log type means dropping in one module that implements the contract, with no change to the dispatcher. This is what makes "flexible" a real property, not a hope. *(ADR-004)*
+- **Pluggable parser contract** — adding a new log type means dropping in one module that implements the contract (parse *and* segment), with no change to the dispatcher or the gold orchestrator. This is what makes "flexible" a real property, not a hope. *(ADR-004)*
+- **One common silver/gold model + JSON overflow** — type-specific fields don't fragment the schema, so cross-system queries stay simple. *(ADR-005)*
 - **Normalize for querying, retain raw for audit** — dual-column pattern for time and severity. *(ADR-006, ADR-007)*
+- **Structure-aware exception segmentation** — segment on the exception signature (the unit of recurrence), not fixed-size windows. *(ADR-009, ADR-010)*
 - **Embed segment text only; metadata as filterable columns** — so identical errors from different systems match semantically, instead of being pushed apart by their metadata. *(ADR-011)*
-- **Embedding-model provenance (pinning)** — vectors are versioned by the model that produced them, enabling safe model migration and A/B evaluation. *(ADR-012)*
+- **Embedding-model provenance (pinning), in a separate table** — vectors are versioned by the model that produced them, enabling safe model migration and A/B evaluation. *(ADR-012)*
 - **Stateless, orchestrator-agnostic steps with GUID keys** — runs single-node today, designed to shard across nodes tomorrow. *(ADR-014)*
+- **Layer state isolation** — each layer reads only its own state, never a downstream layer's, so layers can be physically separated. *(ADR-016)*
 - **Configurable per-field PII policy** — redact secrets, HMAC for privacy-preserving correlation, encrypt where reversibility is required. *(ADR-015)*
 
 Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
@@ -84,9 +106,9 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 | Language | Python 3.11+ |
 | Store (relational + vector) | PostgreSQL + pgvector (via Docker) |
 | Similarity search | pgvector (`<=>` cosine), HNSW index, hybrid metadata filtering |
-| Embeddings | Local embedding model (pinned + versioned) |
-| Generation | Local LLM (swappable, e.g. Mistral / Llama via Ollama) |
-| BI | Power BI (downstream consumer of the gold layer) |
+| Embeddings | Local `sentence-transformers` model (all-MiniLM-L6-v2, 384-dim; pinned + versioned) |
+| Generation | Local LLM via Ollama (swappable; default Mistral) |
+| BI | Power BI (downstream consumer of the gold layer — planned) |
 
 **Platform-agnostic by design.** Core logic is kept storage- and scheduler-agnostic behind clean boundaries, so the same Medallion model maps directly onto Delta Lake + Unity Catalog on Databricks, or equivalent services on AWS — PostgreSQL + pgvector is the reference implementation, not a lock-in.
 
@@ -96,18 +118,21 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 .
 ├── config/              # configuration (config.example.yaml; real config git-ignored)
 ├── data/
-│   ├── raw/             # bulk local data (git-ignored)
+│   ├── raw/             # bulk local data, per-source subfolders (git-ignored)
 │   └── sample/          # small committed sample data
-├── db/init/             # database init scripts (enables pgvector on first start)
+├── db/
+│   ├── init/            # database init scripts (enables pgvector on first start)
+│   └── schema/          # bronze / silver / gold schema (applied by init_db)
 ├── docs/
-│   ├── SETUP.md         # how to run it
+│   ├── SETUP.md         # how to run it, end-to-end
 │   ├── architecture.md  # C4 + Medallion diagrams
 │   └── adr/ADRs.md      # architecture decision records
 ├── src/loglens/
 │   ├── parsers/         # pluggable parser contract + registry + per-type parsers
-│   ├── pipeline/        # bronze / silver / gold steps
+│   ├── pipeline/        # landing_bronze, silver, gold (segment), embed_gold,
+│   │                    #   retrieve_gold, ask_gold (RAG)
 │   ├── storage/         # storage adapter boundary (PostgreSQL + pgvector)
-│   └── retrieval/       # hybrid retrieval + local LLM
+│   └── init_db.py       # idempotent schema application
 ├── tools/               # developer utilities (synthetic log generator)
 ├── tests/
 └── docker-compose.yml   # local PostgreSQL + pgvector
@@ -115,13 +140,13 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 
 ## Status
 
-This is an evolving reference build.
+A working end-to-end reference build: heterogeneous logs in, grounded natural-language answers out.
 
-- **Done:** project scaffold (parser contract, registry, pipeline/storage stubs), synthetic Windows-service log generator, PostgreSQL + pgvector database via Docker, full architecture documentation.
-- **In progress:** the first end-to-end vertical slice — Windows service logs through bronze → silver → exception segmentation → embeddings → a working RAG query.
-- **Designed for, not yet built:** additional log types (Apache, HDFS, EVTX), Power BI dashboards, distributed multi-node execution.
+- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG question answering. Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
+- **Next (documented, designed for):** activating the per-field PII policy (the hook is in place); the bronze archive/completion maintenance process; message templating for tighter exception clustering.
+- **Planned:** additional log types (Apache, HDFS, EVTX) via new parsers; Power BI dashboards; distributed multi-node execution.
 
-The system is deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.
+The system was deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.
 
 ## Test data
 
@@ -129,7 +154,7 @@ A synthetic log generator under [`tools/`](tools/) produces realistic Windows se
 
 ## Configuration & secrets
 
-Source definitions (paths, log type, time zone, PII policy per field) live in config files. **No secrets are committed.** Real config is git-ignored; a `config.example.yaml` template with placeholders shows the expected shape. Connection strings, keys, and salts are supplied via environment / local config only.
+Source definitions (paths, log type, time zone, header pattern, PII policy per field) live in config. **No secrets are committed.** Real config is git-ignored; a `config.example.yaml` template with placeholders shows the expected shape. The database connection string, keys, and salts are supplied via environment / local config only.
 
 ## Design & authorship
 

@@ -1,15 +1,16 @@
 # Core
 pyyaml>=6.0
 
-# Storage (PostgreSQL + pgvector) — reference implementation
+# Storage (PostgreSQL + pgvector) — reference implementation.
+# The pgvector EXTENSION runs in the database (via Docker); no Python package
+# is needed — vectors are sent as text through psycopg.
 psycopg[binary]>=3.1
-pgvector>=0.2
 
-# Embeddings / LLM (local) — pin actual versions when wired
-# ollama>=0.1
+# Embeddings (local) — produces the segment vectors
+sentence-transformers>=5.6
+
+# Generation: Ollama runs as a separate local service (https://ollama.com),
+# not a pip package — pull a model with `ollama pull mistral`. Called via HTTP.
 
 # Dev
 pytest>=8.0
-
-# ML
-sentence-transformers>=5.6

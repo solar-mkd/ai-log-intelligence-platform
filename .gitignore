@@ -8,18 +8,26 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# ML / model caches
+.cache/
 
 # os
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# bulk raw data — ignored, but keep the folder present
-data/raw/*
+# bulk raw data — ignored recursively, but keep the folder present
+data/raw/**
 !data/raw/.gitkeep
 
-*.egg-info/
-build/
-dist/
+# editor (keep the shared VS Code settings)
+.vscode/*
+!.vscode/settings.json
 
 helper.txt
