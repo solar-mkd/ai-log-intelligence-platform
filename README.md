@@ -14,7 +14,7 @@ Answering it normally means manually grepping several log stores, mentally norma
 
 ## The idea
 
-LogLens ingests heterogeneous logs into a **Medallion architecture** (bronze → silver → gold), extracts and segments exceptions, embeds each segment for semantic search, and serves cross-system diagnostic queries through a **local LLM + vector retrieval**. A BI layer sits on top for drill-down and slicing.
+LogLens ingests heterogeneous logs into a **Medallion architecture** (bronze → silver → gold), extracts and segments exceptions, embeds each segment for semantic search, and serves cross-system diagnostic queries through a **local LLM + vector retrieval** — both as one-shot questions and as an interactive, memory-keeping chat. A BI layer sits on top for drill-down and slicing.
 
 Two design choices set it apart from a typical RAG demo:
 
@@ -26,7 +26,7 @@ Two design choices set it apart from a typical RAG demo:
 Ask a plain-English question; get an answer grounded in your actual log data — retrieved semantically, with real occurrence counts and time spans, and no hallucinated specifics:
 
 ```
-$ python -m loglens.pipeline.ask_gold "what database errors are happening and how often?"
+$ python -m loglens.rag.ask_gold "what database errors are happening and how often?"
 
 The database errors primarily involve connection timeouts from
 System.Data.SqlClient.SqlException, across three timeout periods:
@@ -37,6 +37,23 @@ period), and one Microsoft.EntityFrameworkCore.DbUpdateException
 ```
 
 The answer is generated *only* from segments the retrieval layer surfaced — the model is explicitly instructed to answer from that context and to decline when it lacks the information, so responses stay grounded in real data rather than invented.
+
+For exploration, an **interactive chat** keeps conversation memory, so follow-up questions resolve against earlier answers (and each turn still re-retrieves fresh evidence from the logs):
+
+```
+$ python -m loglens.rag.chat_gold
+
+you > what database errors are happening?
+bot > The most frequent are SqlException connection timeouts and a
+      large number of DbUpdateException save failures, plus some deadlocks.
+
+you > when did the deadlocks first appear?
+bot > The deadlock signatures first appear on 2026-05-01, recurring
+      intermittently through 2026-05-08.
+
+you > /context        (shows the segments retrieved for the last question)
+you > exit
+```
 
 ## Architecture at a glance
 
@@ -59,11 +76,12 @@ The answer is generated *only* from segments the retrieval layer surfaced — th
         ▼
    ┌──────────┐   exceptions → structure-aware signature segments
    │   GOLD   │   segments → embeddings (model-pinned, separate table)
-   │          │   PostgreSQL + pgvector  →  hybrid retrieval  →  local LLM (RAG)
+   │          │   PostgreSQL + pgvector  →  hybrid retrieval
    └──────────┘
         │
         ▼
-   RAG Q&A (working)   +   Power BI (drill-down, filtering, slicing — planned)
+   RAG serving layer:  one-shot Q&A  +  interactive chat (memory)   [working]
+        +              Power BI (drill-down, filtering, slicing)    [planned]
 ```
 
 > Rendered diagrams (C4 container view and Medallion data flow) are in **[docs/architecture.md](docs/architecture.md)**. The reasoning behind every decision is in the **[Architecture Decision Records](docs/adr/ADRs.md)**.
@@ -78,7 +96,7 @@ cd ai-log-intelligence-platform
 docker compose up -d        # starts PostgreSQL + pgvector
 ```
 
-That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and running the pipeline end-to-end (ingest → silver → segment → embed → retrieve → ask) — see **[docs/SETUP.md](docs/SETUP.md)**.
+That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and running the pipeline end-to-end (ingest → silver → segment → embed → retrieve → ask/chat) — see **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Why it's built this way (design highlights)
 
@@ -129,8 +147,10 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 │   └── adr/ADRs.md      # architecture decision records
 ├── src/loglens/
 │   ├── parsers/         # pluggable parser contract + registry + per-type parsers
-│   ├── pipeline/        # landing_bronze, silver, gold (segment), embed_gold,
-│   │                    #   retrieve_gold, ask_gold (RAG)
+│   ├── pipeline/        # data-building steps: landing_bronze, silver,
+│   │                    #   gold (segment), embed_gold
+│   ├── rag/             # serving/query layer: retrieve_gold, ask_gold (one-shot),
+│   │                    #   chat_gold (interactive, memory)
 │   ├── storage/         # storage adapter boundary (PostgreSQL + pgvector)
 │   └── init_db.py       # idempotent schema application
 ├── tools/               # developer utilities (synthetic log generator)
@@ -138,11 +158,13 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 └── docker-compose.yml   # local PostgreSQL + pgvector
 ```
 
+The split between **`pipeline/`** (steps that *build* the data, layer by layer) and **`rag/`** (the serving layer that *queries* the finished gold data) reflects a deliberate separation of processing from consumption.
+
 ## Status
 
 A working end-to-end reference build: heterogeneous logs in, grounded natural-language answers out.
 
-- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG question answering. Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
+- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG, available both as one-shot questions (`ask_gold`) and an interactive chat with conversation memory (`chat_gold`). Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
 - **Next (documented, designed for):** activating the per-field PII policy (the hook is in place); the bronze archive/completion maintenance process; message templating for tighter exception clustering.
 - **Planned:** additional log types (Apache, HDFS, EVTX) via new parsers; Power BI dashboards; distributed multi-node execution.
 

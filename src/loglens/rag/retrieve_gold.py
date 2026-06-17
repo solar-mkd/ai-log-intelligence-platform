@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from ..storage.postgres import connect
-from .embed_gold import EMBEDDING_MODEL, EMBEDDING_VERSION, _get_model, _to_pgvector
+from ..pipeline.embed_gold import EMBEDDING_MODEL, EMBEDDING_VERSION, _get_model, _to_pgvector
 
 
 @dataclass
