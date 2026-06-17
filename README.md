@@ -70,7 +70,7 @@ you > exit
    ┌──────────┐   parsed & normalized entries
    │  SILVER  │   universal columns + JSON overflow
    │          │   UTC time (IANA zones), normalized + raw severity
-   │          │   exceptions isolated; per-field PII policy (hook in place)
+   │          │   exceptions isolated; per-field PII policy (redact / HMAC)
    └──────────┘
         │
         ▼
@@ -96,7 +96,7 @@ cd ai-log-intelligence-platform
 docker compose up -d        # starts PostgreSQL + pgvector
 ```
 
-That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and running the pipeline end-to-end (ingest → silver → segment → embed → retrieve → ask/chat) — see **[docs/SETUP.md](docs/SETUP.md)**.
+That brings up the database with the vector extension enabled automatically. For the full walkthrough — Python environment, configuration, generating sample data, and running the whole pipeline for every configured source with one command (`python -m loglens.run_pipeline`), and querying it (`ask_gold` / `chat_gold`) — see **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Why it's built this way (design highlights)
 
@@ -113,7 +113,7 @@ This project leads with architecture; the code is the proof, not the point. The 
 - **Embedding-model provenance (pinning), in a separate table** — vectors are versioned by the model that produced them, enabling safe model migration and A/B evaluation. *(ADR-012)*
 - **Stateless, orchestrator-agnostic steps with GUID keys** — runs single-node today, designed to shard across nodes tomorrow. *(ADR-014)*
 - **Layer state isolation** — each layer reads only its own state, never a downstream layer's, so layers can be physically separated. *(ADR-016)*
-- **Configurable per-field PII policy** — redact secrets, HMAC for privacy-preserving correlation, encrypt where reversibility is required. *(ADR-015)*
+- **Configurable per-field, per-source PII policy** — redact secrets, HMAC for privacy-preserving correlation (both implemented, fail-closed if the key is missing); AES reserved for the rare reversible case. *(ADR-015, ADR-018–020)*
 
 Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 
@@ -164,8 +164,8 @@ The split between **`pipeline/`** (steps that *build* the data, layer by layer) 
 
 A working end-to-end reference build: heterogeneous logs in, grounded natural-language answers out.
 
-- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG, available both as one-shot questions (`ask_gold`) and an interactive chat with conversation memory (`chat_gold`). Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
-- **Next (documented, designed for):** activating the per-field PII policy (the hook is in place); the bronze archive/completion maintenance process; message templating for tighter exception clustering.
+- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow, per-field PII redaction/HMAC) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG, available both as one-shot questions (`ask_gold`) and an interactive chat with conversation memory (`chat_gold`). Sources are config-driven, and the whole pipeline runs for every source with a single orchestrator command (`run_pipeline`). Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
+- **Next (documented, designed for):** the bronze archive/completion maintenance process; message templating for tighter exception clustering; AES action for reversible PII fields (the policy hook is in place).
 - **Planned:** additional log types (Apache, HDFS, EVTX) via new parsers; Power BI dashboards; distributed multi-node execution.
 
 The system was deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.

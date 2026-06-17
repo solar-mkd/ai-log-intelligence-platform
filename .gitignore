@@ -30,4 +30,8 @@ data/raw/**
 .vscode/*
 !.vscode/settings.json
 
+# runtime logs
+logs/
+
+
 helper.txt

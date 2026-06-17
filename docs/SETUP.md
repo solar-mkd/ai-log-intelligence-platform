@@ -1,8 +1,8 @@
 # Setup
 
-How to get LogLens running locally, from cloning the repository to running the
-bronze → silver pipeline. The gold layer (segmentation, embeddings, retrieval)
-will be added to this guide as it comes online.
+How to get LogLens running locally, from cloning the repository to asking
+questions of your logs — the full pipeline (bronze → silver → gold →
+embeddings) plus the RAG query layer.
 
 > For *what* the system is and *why* it is built this way, see the
 > [README](../README.md), [architecture](architecture.md), and
@@ -16,6 +16,9 @@ will be added to this guide as it comes online.
   the PostgreSQL + pgvector database. Verify with `docker run hello-world`.
 - **Python 3.11+** — runs the application and the log generator. Verify with
   `python --version`.
+- **[Ollama](https://ollama.com)** — runs the local LLM for the RAG layer
+  (steps 9–10 only). Install it, then pull a model: `ollama pull mistral`.
+  Ollama runs as its own local service; it is not a Python package.
 
 The database extension (pgvector) is enabled automatically; there is no manual
 database installation.
@@ -65,12 +68,14 @@ then `docker compose up -d` (see *Managing the database* below).
 | Action | Command |
 |---|---|
 | Start (background) | `docker compose up -d` |
-| Stop (keep data) | `docker compose down` |
+| Stop (keep data) | `docker compose stop` (or `docker compose down`) |
 | Reset (delete all data, fresh start) | `docker compose down -v` then `docker compose up -d` |
 | View logs | `docker compose logs -f db` |
 
-The data lives in a named Docker volume and persists across stop/start. Use the
-reset command when you want a clean database (for example after schema changes).
+The data lives in a named Docker volume and persists across stop/start. Only
+`docker compose down -v` (note the `-v`) deletes the volume and wipes the data —
+use it when you deliberately want a clean database (e.g. after schema changes).
+A plain `stop`/`down` keeps everything.
 
 ## 3. Set up the Python environment
 
@@ -93,7 +98,8 @@ pip install -e .                  # install the loglens package (editable)
 The `pip install -e .` step installs the project's own `loglens` package into
 the environment in editable mode. This is required for `import loglens` to work
 outside the test runner (the package lives under `src/`), and edits to the
-source take effect immediately.
+source take effect immediately. (Installing `sentence-transformers` also pulls
+in PyTorch and friends, so this step downloads a few hundred MB the first time.)
 
 > **Activate the venv at the start of every session.** Each new terminal starts
 > on the system Python; re-run the activate command above. When the venv is
@@ -114,10 +120,14 @@ python -c "import sys; print(sys.executable)"   # should point inside .venv
 python -c "import psycopg; print(psycopg.__version__)"
 ```
 
-## 4. Configure the database connection
+## 4. Configure environment variables
 
-The connection string is supplied via the `LOGLENS_DB_DSN` environment variable
-(never written into a committed file). For the default Docker database:
+Two environment variables are used. Neither is ever written into a committed
+file — set them in your shell, or in a local `.env` (git-ignored) that your
+editor loads.
+
+**`LOGLENS_DB_DSN`** — the database connection string. For the default Docker
+database:
 
 ```bash
 # macOS/Linux
@@ -127,9 +137,25 @@ export LOGLENS_DB_DSN="postgresql://loglens:loglens@localhost:5432/loglens"
 $env:LOGLENS_DB_DSN="postgresql://loglens:loglens@localhost:5432/loglens"
 ```
 
-(The `loglens`/`loglens` credentials are local-development defaults defined in
-`docker-compose.yml` — not secrets, used only by the local container. The
-variable lasts only for the current terminal session.)
+**`LOGLENS_PII_HMAC_KEY`** — a secret key used to pseudonymise PII fields that a
+source configures for `hmac` (ADR-015). Required only if a source has an `hmac`
+action in its `pii_policy`; the silver step **fails closed** (refuses to run)
+rather than write unprotected PII if it is missing.
+
+```bash
+# macOS/Linux
+export LOGLENS_PII_HMAC_KEY="a-long-random-secret-string"
+
+# Windows (PowerShell)
+$env:LOGLENS_PII_HMAC_KEY="a-long-random-secret-string"
+```
+
+> Keep the HMAC key **stable**. The same input only produces the same
+> fingerprint under the same key — changing it changes every hash, breaking
+> correlation across runs.
+
+> **`.env` is read when the terminal is created.** If you add a variable to
+> `.env`, open a **new** terminal so it is picked up.
 
 Confirm the application can reach the database and that pgvector is enabled:
 
@@ -148,16 +174,48 @@ With the database running and `LOGLENS_DB_DSN` set, create the tables:
 python -m loglens.init_db
 ```
 
-You should see each schema file applied, ending with `Done. Schema is up to
-date.` This step is **idempotent** (it uses `IF NOT EXISTS` throughout), so it
-is safe to run again after pulling schema changes. To verify:
-`docker exec -it loglens-db psql -U loglens -d loglens -c "\dt"`.
+You should see each schema file applied (bronze, silver, gold). This step is
+**idempotent**, so it is safe to run again after pulling schema changes. To
+verify: `docker exec -it loglens-db psql -U loglens -d loglens -c "\dt"`.
 
-## 6. Generate sample log data
+## 6. Configure your sources
 
-Generate synthetic Windows service logs into a per-source folder. The
+Source definitions live in `config/config.yaml` (git-ignored). Copy the example
+and edit it:
+
+```bash
+cp config/config.example.yaml config/config.yaml
+```
+
+Each entry under `sources:` defines one source — its log type, file location,
+time zone, and (optionally) a per-field PII policy:
+
+```yaml
+sources:
+  windows_service_1:
+    log_type: windows_service
+    location: data/raw/windows_service_1
+    timezone: Australia/Brisbane
+    pii_policy:              # optional; omit to leave fields as-is
+      User: hmac             #   hmac   = keyed pseudonymisation
+      Country: hmac          #   redact = irreversible removal
+      Account Id: redact
+```
+
+The same `log_type` may appear under several sources with different settings —
+e.g. a production source with a `pii_policy` and a test source without one.
+Confirm your sources load:
+
+```bash
+python -c "from loglens.config import list_sources; print(list_sources())"
+```
+
+## 7. Generate sample log data
+
+Generate synthetic Windows service logs into each source's folder. The
 `--incidents` and `--pii` flags seed correlated error bursts and synthetic PII
-fields (useful for later layers); both are optional.
+fields; both are optional (use `--pii` for a source whose PII handling you want
+to exercise).
 
 ```bash
 python tools/generate_windows_logs.py \
@@ -171,77 +229,86 @@ is git-ignored (bulk data); `data/sample` holds the small committed sample.
 
 ## Running the pipeline
 
-The pipeline currently covers two layers: **bronze** (raw landing) and
-**silver** (parsed, normalized entries). Each step is run per source. While the
-system is still under active development there is no single orchestrator yet;
-each step is invoked directly (a `main.py` orchestrator and config-driven runs
-will come once the layers stabilize).
+Every step is run **per source by id** (`--source-id`); all other settings come
+from `config/config.yaml`. You can run the whole pipeline for every configured
+source with one command, or run individual steps.
 
-### 7a. Ingest into the bronze layer
-
-Reads the source's log files, splits them into individual entries, and lands
-them verbatim into `bronze_landing` (idempotent — re-running skips unchanged
-files). A run is recorded in `bronze_runs`.
+### 8. Run the full pipeline (all sources)
 
 ```bash
-python -m loglens.pipeline.landing_bronze \
-    --source-id windows_service_1 \
-    --location data/raw/windows_service_1 \
-    --timezone Australia/Brisbane
+python -m loglens.run_pipeline
 ```
 
-A summary prints at the end (files processed, entries landed, duration). To
-watch progress live, query `bronze_runs` in another session:
+This runs, for every source in config, in order: **bronze landing → silver →
+gold segmentation → embeddings**. It continues to the next source if one fails,
+prints a per-source summary at the end, and records any failures in
+`logs/pipeline_errors.log`.
 
-```sql
-SELECT source_id, status, files_processed, entries_landed
-FROM bronze_runs ORDER BY started_utc DESC LIMIT 1;
-```
-
-### 7b. Transform bronze → silver
-
-Reads undigested `bronze_landing` entries for the source, parses each into the
-common silver shape (UTC-normalized time, normalized + raw severity, logger,
-message, exception text, and a JSON overflow for the rest), writes
-`silver_log_entries`, and marks the bronze entries digested. Commits per file.
+<details>
+<summary>Or run the steps individually</summary>
 
 ```bash
-python -m loglens.pipeline.silver \
-    --source-id windows_service_1 \
-    --timezone Australia/Brisbane
-```
+# bronze: land raw entries (idempotent; re-running skips unchanged files)
+python -m loglens.pipeline.landing_bronze --source-id windows_service_1
 
-### 7c. Inspect the result
+# silver: parse + normalize + apply PII policy
+python -m loglens.pipeline.silver --source-id windows_service_1
+
+# gold: segment exceptions into signatures
+python -m loglens.pipeline.gold --source-id windows_service_1
+
+# embeddings: vectorise the segments (omit --source-id to embed all sources)
+python -m loglens.pipeline.embed_gold --source-id windows_service_1
+```
+</details>
+
+### 9. Inspect the result
 
 ```sql
 -- structured silver rows
 SELECT severity, logger, is_exception, message, event_time_utc
 FROM silver_log_entries LIMIT 20;
 
--- error / exception counts
-SELECT count(*) AS total,
-       count(*) FILTER (WHERE is_exception) AS exceptions
-FROM silver_log_entries;
+-- distinct exception signatures and how often each recurs
+SELECT segment_text, count(*) AS occurrences
+FROM gold_exception_segments
+GROUP BY segment_text ORDER BY occurrences DESC LIMIT 20;
+
+-- confirm a PII-protected source is obfuscated (hashes / [REDACTED])
+SELECT extra_fields FROM silver_log_entries
+WHERE source_id = 'windows_service_1' AND extra_fields ? 'User' LIMIT 5;
 ```
 
-> **Note on the `--timezone`.** Pass the IANA zone the source's logs were
-> recorded in; it is used to normalize timestamps to UTC (ADR-007). Use the same
-> value for ingest and transform of a given source.
+### 10. Ask questions (RAG)
 
-> **Re-running the transform.** The transform only reads *undigested* bronze
-> entries. To re-transform after a parser change during development, reset the
-> flags first: `UPDATE bronze_landing SET is_digested = false;` (and optionally
-> `TRUNCATE silver_log_entries;`). For a fully clean slate, reset the database
-> with `docker compose down -v` and start from step 2.
+With Ollama running and a model pulled, ask in natural language. One-shot:
 
-## 8. Run the tests
+```bash
+python -m loglens.rag.ask_gold "what database errors are happening and how often?"
+```
+
+Or an interactive chat that keeps conversation memory for follow-ups:
+
+```bash
+python -m loglens.rag.chat_gold
+```
+
+Useful flags: `--model <name>` (default `mistral`), `--top-k <n>`,
+`--show-context` (ask_gold). The first call loads the model into memory and is
+slow; later calls are faster.
+
+> You can also query retrieval directly, without the LLM, to inspect what would
+> be fed to it: `python -m loglens.rag.retrieve_gold "database deadlock"`.
+
+## 11. Run the tests
 
 ```bash
 pytest tests/ -v
 ```
 
 The database-dependent tests run only when `LOGLENS_DB_DSN` is set; otherwise
-they skip, so the suite stays green without a database.
+they skip, so the suite stays green without a database. The PII tests need no
+database.
 
 ---
 
@@ -265,9 +332,21 @@ installed in the active environment. Activate the venv and run `pip install -e .
 **`LOGLENS_DB_DSN is not set`.** Set the connection string in the current
 terminal (step 4); it only lasts for that session.
 
-**Transform reports 0 entries.** All bronze entries for the source are already
-digested. Reset with `UPDATE bronze_landing SET is_digested = false;` to
-re-transform (see step 7b note).
+**`LOGLENS_PII_HMAC_KEY is not set` (PIIPolicyError).** A source has an `hmac`
+PII action but the key isn't set. Set it (step 4) in a fresh terminal. This
+fail-closed behaviour is deliberate — it prevents writing unprotected PII.
+
+**`source '<id>' not found in config`.** The `--source-id` doesn't match a key
+under `sources:` in `config/config.yaml`. Check `list_sources()` (step 6).
+
+**Transform/segment reports 0 entries.** The source's entries are already
+processed at that layer (idempotency). To re-transform after a parser change,
+reset: `UPDATE bronze_landing SET is_digested = false;` (and optionally
+`TRUNCATE silver_log_entries;`). For a fully clean slate, `docker compose down -v`
+and start from step 2.
+
+**RAG can't reach Ollama.** Confirm Ollama is running and the model is pulled
+(`ollama list`). The first query is slow while the model loads into memory.
 
 **Cannot connect from Python.** Confirm the container is healthy
 (`docker compose ps`) and that `LOGLENS_DB_DSN` matches the credentials in

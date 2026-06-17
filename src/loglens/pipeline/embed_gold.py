@@ -164,14 +164,29 @@ def _print_summary(r: EmbedResult) -> None:
 
 def main(argv=None) -> int:
     import argparse
+    from ..config import get_source_config, ConfigError
+
     p = argparse.ArgumentParser(
         description="Embed gold exception segments into gold_embeddings.",
     )
     p.add_argument("--source-id", default=None,
-                   help="Limit to one source. Omit to embed all sources.")
+                   help="Limit to one source (validated against config). "
+                        "Omit to embed all sources.")
+    p.add_argument("--config", default=None,
+                   help="Path to config file (default: config/config.yaml).")
     args = p.parse_args(argv)
 
-    cfg = {"source_id": args.source_id} if args.source_id else None
+    cfg = None
+    if args.source_id is not None:
+        # Validate the source id against config (clear error on a typo);
+        # embedding itself only needs the id, but this keeps the CLI uniform
+        # with the other steps and catches mistakes loudly.
+        try:
+            cfg = get_source_config(args.source_id, args.config)
+        except ConfigError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+
     embed_segments(cfg)
     return 0
 

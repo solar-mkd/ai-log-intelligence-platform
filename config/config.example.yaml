@@ -1,88 +1,32 @@
-# LogLens — example configuration
+# LogLens source configuration (example).
 #
-# Copy this file to `config.yaml` and fill in real values.
-# `config.yaml` is git-ignored and must never be committed (it may contain
-# connection details). Only this `.example` template is tracked.
+# Copy this file to config/config.yaml (git-ignored) and edit it for your
+# environment. Each entry under `sources:` defines one log source; pipeline
+# steps look it up by its source id (the key), e.g.:
 #
-# Each source declares WHERE its logs are, WHAT type they are, the time zone
-# they were recorded in, and how individual fields should be treated for
-# privacy. See docs/adr/adrs.md (ADR-004, ADR-007, ADR-015) for the reasoning.
+#   python -m loglens.pipeline.landing_bronze --source-id windows_service_1
+#   python -m loglens.pipeline.silver         --source-id windows_service_1
+#
+# Secrets are NOT stored here. The database DSN comes from LOGLENS_DB_DSN, and
+# the PII HMAC key from LOGLENS_PII_HMAC_KEY (see docs/SETUP.md).
 
-# ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
-# The single PostgreSQL + pgvector store (ADR-013). Connection secrets are
-# supplied via environment variables, NOT written here.
-storage:
-  backend: postgres            # postgres | sqlite (sqlite for zero-setup demo)
-  # Connection is read from the environment, e.g.:
-  #   LOGLENS_DB_DSN=postgresql://user:pass@host:5432/loglens
-  dsn_env: LOGLENS_DB_DSN
-
-# ---------------------------------------------------------------------------
-# Embedding model (ADR-012)
-# ---------------------------------------------------------------------------
-# The embedding model is a PINNED, versioned dependency. Its name+version is
-# stored with every vector so a future model change is detected and the
-# corpus can be safely re-embedded. The chat LLM is separate and swappable.
-embedding:
-  model: nomic-embed-text      # example; pin whatever you actually use
-  version: "1.5"
-  dimensions: 768
-
-# The generation (chat) LLM is freely swappable — no data migration impact.
-llm:
-  provider: ollama
-  model: mistral               # example; any local model
-
-# ---------------------------------------------------------------------------
-# Sources
-# ---------------------------------------------------------------------------
-# One entry per log source. `log_type` selects the parser via the registry
-# (ADR-004). `timezone` is an IANA zone name (NOT a fixed offset) so that
-# timestamps convert to UTC correctly across daylight-saving boundaries
-# (ADR-007).
 sources:
-  - source_id: win-svc-app01
-    log_type: windows_service          # must match a registered parser
-    location: /var/log/loglens/app01   # file share / directory to read from
-    timezone: Australia/Brisbane       # IANA zone — resolves correct UTC offset
-    enabled: true
 
-    # Per-field PII policy (ADR-015). Each action is applied at silver ingestion.
-    #   redact  — irreversible removal (secrets, passwords)
-    #   hmac    — keyed hash: enables correlation/grouping without revealing
-    #             the value; resists dictionary attack. Pseudonymisation, not
-    #             anonymisation. Secret salt comes from the environment.
-    #   encrypt — AES symmetric; only when the original must be recoverable.
-    pii_policy:
-      password: redact
-      username: hmac
-      country: hmac
-      account_id: encrypt
-    # Secret salt / keys are read from the environment, never stored here:
-    #   LOGLENS_HMAC_SALT=...
-    #   LOGLENS_AES_KEY=...
+  # A production source: its PII fields are obfuscated (ADR-015).
+  windows_service_1:
+    log_type: windows_service               # selects the parser
+    location: data/raw/windows_service_1     # directory of log files
+    timezone: Australia/Brisbane             # IANA zone (for UTC normalization)
+    # header_pattern: "..."                  # optional; parser default if omitted
+    # earliest_date: "2026-01-01"            # optional; cutoff for the FIRST import
+    pii_policy:                              # optional; per-field actions
+      User: hmac                             #   hmac   = keyed pseudonymisation
+      Country: hmac                          #   redact = irreversible removal
+      Account Id: redact                     #   (encrypt = reserved, not yet impl.)
 
-  # Additional sources follow the same shape. Adding a new LOG TYPE means
-  # dropping a new parser module into src/loglens/parsers/ that implements the
-  # contract and self-registers — no change to existing config or dispatch.
-  #
-  # - source_id: apache-web01
-  #   log_type: apache
-  #   location: /var/log/loglens/apache01
-  #   timezone: Europe/Skopje
-  #   enabled: false
-  #   pii_policy:
-  #     client_ip: hmac
-
-# ---------------------------------------------------------------------------
-# Retrieval (ADR-011, ADR-013)
-# ---------------------------------------------------------------------------
-# Hybrid retrieval: filter on metadata columns (time window, source, severity),
-# then rank survivors by vector similarity. Only the segment TEXT is embedded;
-# metadata stays as filterable columns.
-retrieval:
-  top_k: 10
-  distance: cosine             # pgvector <=> operator
-  default_time_window_hours: 24
+  # A test source of the SAME log type, with NO pii_policy — values left as-is.
+  # (Demonstrates that PII handling is per-source, not per-log-type.)
+  windows_service_2:
+    log_type: windows_service
+    location: data/raw/windows_service_2
+    timezone: Australia/Brisbane

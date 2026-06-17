@@ -173,25 +173,29 @@ def _print_summary(r: TransformResult) -> None:
         f"  entries failed    : {r.entries_failed}"
     )
 
-
 def main(argv=None) -> int:
     import argparse
+    from ..config import get_source_config, ConfigError
+ 
     p = argparse.ArgumentParser(
         description="Transform a source's undigested bronze entries into the silver layer.",
     )
-    p.add_argument("--source-id", required=True, help="Identifier for the source to transform.")
-    p.add_argument("--log-type", default="windows_service", help="Parser/log type. Default: windows_service")
-    p.add_argument("--timezone", default="UTC", help="IANA timezone of the source (e.g. Australia/Brisbane).")
+    p.add_argument("--source-id", required=True,
+                   help="Source id defined in the config file.")
+    p.add_argument("--config", default=None,
+                   help="Path to config file (default: config/config.yaml).")
     args = p.parse_args(argv)
-
-    transform_to_silver({
-        "source_id": args.source_id,
-        "log_type": args.log_type,
-        "timezone": args.timezone,
-    })
+ 
+    try:
+        source_config = get_source_config(args.source_id, args.config)
+    except ConfigError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+ 
+    transform_to_silver(source_config)
     return 0
-
-
+ 
+ 
 if __name__ == "__main__":
     import sys
     sys.exit(main(sys.argv[1:]))

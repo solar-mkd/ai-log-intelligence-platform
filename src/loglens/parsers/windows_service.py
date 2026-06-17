@@ -23,6 +23,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .registry import register
+from ..pii import apply_pii_policy
 
 PARSER_VERSION = "windows_service/1.0"
 
@@ -229,12 +230,12 @@ class WindowsServiceParser:
 def _apply_pii_policy(fields: dict[str, Any], source_config: dict[str, Any]) -> dict[str, Any]:
     """PII policy hook (ADR-015).
 
-    Currently a pass-through: returns fields unchanged. This is the single place
-    the per-field policy (redact / HMAC / encrypt) will be applied later, reading
-    the policy from source_config['pii_policy']. Building the seam now keeps the
-    later change localized to this function.
+    Applies the source's per-field PII policy (redact / hmac) to the extracted
+    fields before they enter silver. The policy is read from
+    source_config['pii_policy']; fields not named pass through unchanged. Fails
+    closed if 'hmac' is configured without the secret key (see pii module).
     """
-    return fields
+    return apply_pii_policy(fields, source_config)
 
 
 def to_utc(local_dt: datetime | None, tz_name: str) -> datetime | None:

@@ -141,14 +141,24 @@ def _print_summary(r: SegmentResult) -> None:
 
 def main(argv=None) -> int:
     import argparse
+    from ..config import get_source_config, ConfigError
+
     p = argparse.ArgumentParser(
         description="Segment a source's silver exceptions into the gold layer.",
     )
-    p.add_argument("--source-id", required=True, help="Identifier for the source to segment.")
-    p.add_argument("--log-type", default="windows_service", help="Parser/log type. Default: windows_service")
+    p.add_argument("--source-id", required=True,
+                   help="Source id defined in the config file.")
+    p.add_argument("--config", default=None,
+                   help="Path to config file (default: config/config.yaml).")
     args = p.parse_args(argv)
 
-    transform_to_gold({"source_id": args.source_id, "log_type": args.log_type})
+    try:
+        source_config = get_source_config(args.source_id, args.config)
+    except ConfigError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    transform_to_gold(source_config)
     return 0
 
 
