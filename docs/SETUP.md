@@ -28,7 +28,7 @@ database installation.
 ## 1. Clone the repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/solar-mkd/ai-log-intelligence-platform.git
 cd ai-log-intelligence-platform
 ```
 
@@ -263,6 +263,17 @@ python -m loglens.pipeline.embed_gold --source-id windows_service_1
 </details>
 
 ### 9. Inspect the result
+
+> **Running the SQL examples.** These run against the `loglens` **database**.
+> Open a SQL prompt with:
+> ```bash
+> docker exec -it loglens-db psql -U loglens -d loglens
+> ```
+> Note the naming: `loglens-db` is the *Docker container*, while the database,
+> user, and password are all `loglens`. Or connect with a GUI client (e.g.
+> DBeaver) using host `localhost`, port `5432`, database `loglens`, user
+> `loglens`, password `loglens`. These are local-development defaults from
+> `docker-compose.yml` — not secrets.
 
 ```sql
 -- structured silver rows
