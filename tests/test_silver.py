@@ -7,7 +7,7 @@ and LOGLENS_DB_DSN, and skips otherwise.
 import os
 import pytest
 
-from loglens.parsers.windows_service import WindowsServiceParser, to_utc
+from loglens.parsers.windows_service import WindowsServiceParser
 from loglens.storage.postgres import DSN_ENV_VAR
 
 CFG = {"timezone": "Australia/Brisbane", "source_id": "demo", "log_type": "windows_service"}
@@ -34,8 +34,9 @@ def test_parses_header_fields():
 
 
 def test_utc_conversion():
-    r = WindowsServiceParser().parse(ERROR_ENTRY, CFG)
-    utc = to_utc(r.event_time_local, CFG["timezone"])
+    parser = WindowsServiceParser()
+    r = parser.parse(ERROR_ENTRY, CFG)
+    utc = parser.to_utc(r.event_time_local, CFG["timezone"])
     # Brisbane is UTC+10, so 04:42 local -> 18:42 previous day UTC
     assert utc.hour == 18
 

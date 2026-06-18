@@ -226,6 +226,15 @@ class WindowsServiceParser:
                 idx += 1
         return segments
 
+    def to_utc(self, local_dt: datetime | None, tz_name: str) -> datetime | None:
+        """Convert a naive local datetime to UTC using an IANA zone (ADR-007).
+        Each parser owns its time handling. Windows service timestamps are naive
+        local time, so attach the source's zone, then convert."""
+        if local_dt is None:
+            return None
+        local_aware = local_dt.replace(tzinfo=ZoneInfo(tz_name))
+        return local_aware.astimezone(ZoneInfo("UTC"))
+
 
 def _apply_pii_policy(fields: dict[str, Any], source_config: dict[str, Any]) -> dict[str, Any]:
     """PII policy hook (ADR-015).
@@ -236,11 +245,3 @@ def _apply_pii_policy(fields: dict[str, Any], source_config: dict[str, Any]) -> 
     closed if 'hmac' is configured without the secret key (see pii module).
     """
     return apply_pii_policy(fields, source_config)
-
-
-def to_utc(local_dt: datetime | None, tz_name: str) -> datetime | None:
-    """Convert a naive local datetime to UTC using an IANA zone (ADR-007)."""
-    if local_dt is None:
-        return None
-    local_aware = local_dt.replace(tzinfo=ZoneInfo(tz_name))
-    return local_aware.astimezone(ZoneInfo("UTC"))

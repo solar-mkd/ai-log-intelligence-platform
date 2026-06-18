@@ -4,6 +4,13 @@
 
 ---
 
+> **Architecture-led.** This project is built decisions-first: every significant
+> design choice — how logs are chunked, how exceptions become the unit of
+> retrieval, how PII is governed, how the layers stay independently scalable — is
+> documented with its trade-offs and the alternatives that were rejected, in a
+> set of **[Architecture Decision Records](docs/adr/ADRs.md)**. The code is the
+> proof; the reasoning is the point.
+
 ## The problem
 
 When something fails in a complex environment, the evidence is scattered. The same incident leaves traces in different systems — application logs, web-server logs, distributed-system logs — each in its own format, its own time zone, its own severity scheme. Answering a simple operational question is therefore hard:
@@ -55,10 +62,16 @@ you > /context        (shows the segments retrieved for the last question)
 you > exit
 ```
 
+Because two structurally different log types — Windows service (.NET) and Apache
+access logs — flow through the *same* pipeline, a question scoped to a time
+window surfaces correlated evidence across both: a database deadlock burst in the
+service tier alongside the HTTP 5xx spike it caused in the web tier. That
+cross-system temporal correlation is the headline capability.
+
 ## Architecture at a glance
 
 ```
-   Sources (Windows service logs first; Apache, HDFS, EVTX, … by design)
+   Sources (Windows service + Apache access logs today; HDFS, EVTX, … by design)
         │
         ▼
    ┌──────────┐   raw entries, hash-based idempotency, audit trail
@@ -105,7 +118,7 @@ This project leads with architecture; the code is the proof, not the point. The 
 - **Medallion layering with audit-first lineage** — raw fidelity, clean structure, and analytical products kept separate, each layer independently re-runnable. *(ADR-001, ADR-002)*
 - **ELT, not ETL, at the boundary** — bronze lands raw entries with minimal transformation, so ingestion almost never fails; shaping happens downstream. *(ADR-001/002)*
 - **Hash-based idempotency** at entry and file level — safe re-runs, correct handling of rotated logs. *(ADR-003)*
-- **Pluggable parser contract** — adding a new log type means dropping in one module that implements the contract (parse *and* segment), with no change to the dispatcher or the gold orchestrator. This is what makes "flexible" a real property, not a hope. *(ADR-004)*
+- **Pluggable parser contract — proven, not promised** — a second, structurally different log type (Apache access logs) was added as one self-registering module, with no change to the dispatcher, silver, the gold orchestrator, or the RAG layer. Adding Apache also surfaced and fixed a hidden coupling (time conversion is now parser-owned), exactly the kind of validation a second implementation provides. *(ADR-004, ADR-019)*
 - **One common silver/gold model + JSON overflow** — type-specific fields don't fragment the schema, so cross-system queries stay simple. *(ADR-005)*
 - **Normalize for querying, retain raw for audit** — dual-column pattern for time and severity. *(ADR-006, ADR-007)*
 - **Structure-aware exception segmentation** — segment on the exception signature (the unit of recurrence), not fixed-size windows. *(ADR-009, ADR-010)*
@@ -164,15 +177,15 @@ The split between **`pipeline/`** (steps that *build* the data, layer by layer) 
 
 A working end-to-end reference build: heterogeneous logs in, grounded natural-language answers out.
 
-- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow, per-field PII redaction/HMAC) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG, available both as one-shot questions (`ask_gold`) and an interactive chat with conversation memory (`chat_gold`). Sources are config-driven, and the whole pipeline runs for every source with a single orchestrator command (`run_pipeline`). Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
+- **Working:** the full vertical slice — Windows service logs through bronze (landing, idempotency, per-run observability) → silver (parsing, UTC/severity normalization, exception isolation, JSON overflow, per-field PII redaction/HMAC) → gold (structure-aware exception segmentation → model-pinned embeddings → hybrid vector retrieval) → local-LLM RAG, available both as one-shot questions (`ask_gold`) and an interactive chat with conversation memory (`chat_gold`). **Two structurally different log types are supported — Windows service (.NET) and Apache access logs — proving the pluggable parser design.** Sources are config-driven, and the whole pipeline runs for every source with a single orchestrator command (`run_pipeline`). Reproducible from a clean clone (see SETUP.md), with a test suite and a synthetic log generator.
 - **Next (documented, designed for):** the bronze archive/completion maintenance process; message templating for tighter exception clustering; AES action for reversible PII fields (the policy hook is in place).
-- **Planned:** additional log types (Apache, HDFS, EVTX) via new parsers; Power BI dashboards; distributed multi-node execution.
+- **Planned:** further log types (HDFS, EVTX, syslog) via new parsers; Power BI dashboards; distributed multi-node execution.
 
 The system was deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.
 
 ## Test data
 
-A synthetic log generator under [`tools/`](tools/) produces realistic Windows service (.NET) logs with recurring exception families, optional correlated incident bursts, and optional synthetic PII fields — so the platform's retrieval and correlation features have structured data to work against. All generated data is synthetic and safe to commit. See **[tools/README.md](tools/README.md)**.
+Synthetic log generators under [`tools/`](tools/) produce realistic Windows service (.NET) logs (recurring exception families, optional correlated incident bursts, optional synthetic PII) and Apache access logs (with 5xx error bursts in overlapping time windows, so cross-system correlation has something to find). All generated data is synthetic and safe to commit. See **[tools/README.md](tools/README.md)**.
 
 ## Configuration & secrets
 

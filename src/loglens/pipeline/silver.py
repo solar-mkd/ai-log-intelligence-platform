@@ -28,7 +28,6 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from ..parsers.registry import get_parser
-from ..parsers.windows_service import to_utc
 from ..storage.postgres import connect
 
 SILVER_BATCH_SIZE = 1000
@@ -102,7 +101,7 @@ def transform_to_silver(source_config: dict[str, Any], dsn: str | None = None) -
                             result.entries_failed += 1
                             continue
 
-                        event_time_utc = to_utc(parsed.event_time_local, tz_name)
+                        event_time_utc = parser.to_utc(parsed.event_time_local, tz_name)
                         silver_rows.append((
                             uuid.uuid4(), entry_hash, landing_id, source_id, log_type,
                             parsed.parser_version,
@@ -173,10 +172,11 @@ def _print_summary(r: TransformResult) -> None:
         f"  entries failed    : {r.entries_failed}"
     )
 
+
 def main(argv=None) -> int:
     import argparse
     from ..config import get_source_config, ConfigError
- 
+
     p = argparse.ArgumentParser(
         description="Transform a source's undigested bronze entries into the silver layer.",
     )
@@ -185,17 +185,17 @@ def main(argv=None) -> int:
     p.add_argument("--config", default=None,
                    help="Path to config file (default: config/config.yaml).")
     args = p.parse_args(argv)
- 
+
     try:
         source_config = get_source_config(args.source_id, args.config)
     except ConfigError as exc:
         print(f"ERROR: {exc}")
         return 1
- 
+
     transform_to_silver(source_config)
     return 0
- 
- 
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(main(sys.argv[1:]))

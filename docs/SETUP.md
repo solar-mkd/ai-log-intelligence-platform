@@ -17,8 +17,10 @@ embeddings) plus the RAG query layer.
 - **Python 3.11+** — runs the application and the log generator. Verify with
   `python --version`.
 - **[Ollama](https://ollama.com)** — runs the local LLM for the RAG layer
-  (steps 9–10 only). Install it, then pull a model: `ollama pull mistral`.
-  Ollama runs as its own local service; it is not a Python package.
+  (step 10 only). Download and install it from [ollama.com](https://ollama.com),
+  then pull a model: `ollama pull mistral`. Ollama runs as its own local
+  background service (not a Python package); see step 10 for starting it and
+  confirming the model is available.
 
 The database extension (pgvector) is enabled automatically; there is no manual
 database installation.
@@ -200,11 +202,38 @@ sources:
       User: hmac             #   hmac   = keyed pseudonymisation
       Country: hmac          #   redact = irreversible removal
       Account Id: redact
+
+  # A second, structurally different log type — Apache access logs — proving the
+  # pluggable parser design (ADR-004). Single-line logs need two extra fields so
+  # ingestion finds and splits them correctly:
+  #   file_prefix   — the filename prefix to match (Apache files are access-*.log)
+  #   header_pattern— a regex that marks the start of each entry; for single-line
+  #                   logs, match the start of every line (here: a leading IP).
+  apache_1:
+    log_type: apache_access
+    location: data/raw/apache_1
+    timezone: Australia/Brisbane
+    file_prefix: access
+    header_pattern: "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} "
+    pii_policy:              # client IP / remote user are PII for Apache
+      client_ip: hmac
+      remote_user: hmac
+  apache_2:
+    log_type: apache_access
+    location: data/raw/apache_2
+    timezone: Australia/Brisbane
+    file_prefix: access
+    header_pattern: "^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} "
 ```
 
+> **`file_prefix` and `header_pattern`** default to the Windows convention
+> (prefix `log`, an `M/D/YYYY h:mm:ss AM/PM` header). Any log type whose files
+> or entry boundaries differ — like Apache — sets them explicitly per source, as
+> above. This is the only configuration a new single-line log type needs.
+
 The same `log_type` may appear under several sources with different settings —
-e.g. a production source with a `pii_policy` and a test source without one.
-Confirm your sources load:
+e.g. a production source with a `pii_policy` and a test source without one
+(`apache_1` vs `apache_2` above). Confirm your sources load:
 
 ```bash
 python -c "from loglens.config import list_sources; print(list_sources())"
@@ -220,6 +249,16 @@ to exercise).
 ```bash
 python tools/generate_windows_logs.py \
     --output_dir data/raw/windows_service_1 --incidents --pii
+```
+
+For Apache sources, generate access logs into each Apache source folder. The
+generator defaults to the same date range as the Windows sample
+(2026-04-30 .. 2026-05-10) so the two systems overlap in time and cross-system
+queries have correlated evidence; use a different `--seed` per source:
+
+```bash
+python tools/generate_apache_logs.py --output_dir data/raw/apache_1 --seed 1
+python tools/generate_apache_logs.py --output_dir data/raw/apache_2 --seed 2
 ```
 
 See [tools/README.md](../tools/README.md) for all generator options. `data/raw`
@@ -288,9 +327,29 @@ GROUP BY segment_text ORDER BY occurrences DESC LIMIT 20;
 -- confirm a PII-protected source is obfuscated (hashes / [REDACTED])
 SELECT extra_fields FROM silver_log_entries
 WHERE source_id = 'windows_service_1' AND extra_fields ? 'User' LIMIT 5;
+
+-- confirm BOTH log types are present in gold (the pluggability check)
+SELECT source_id, log_type, count(*)
+FROM gold_exception_segments
+GROUP BY source_id, log_type ORDER BY source_id;
 ```
 
 ### 10. Ask questions (RAG)
+
+This step needs Ollama running with a model pulled. Start it and confirm:
+
+```bash
+# 1. Make sure the Ollama service is running.
+#    On Windows/macOS the desktop app starts it automatically (check the tray /
+#    menu bar). To start it manually in a spare terminal:
+ollama serve
+
+# 2. Pull a model once (downloads a few GB the first time):
+ollama pull mistral
+
+# 3. Confirm the model is available (and the service is reachable):
+ollama list      # 'mistral' should appear in the list
+```
 
 With Ollama running and a model pulled, ask in natural language. One-shot:
 
@@ -307,6 +366,14 @@ python -m loglens.rag.chat_gold
 Useful flags: `--model <name>` (default `mistral`), `--top-k <n>`,
 `--show-context` (ask_gold). The first call loads the model into memory and is
 slow; later calls are faster.
+
+> **First-call cold start.** On a CPU-only or slower machine the very first query
+> can be slow enough to time out while the model loads. If that happens, simply
+> run it again — the model stays warm in memory for a few minutes, so the second
+> call returns quickly. You can also "warm" it first (`ollama run mistral`, type
+> anything, then `/bye`), or use a smaller, faster model — e.g.
+> `ollama pull llama3.2:3b` then `--model llama3.2:3b` — which is more than
+> adequate for summarizing the retrieved segments.
 
 > You can also query retrieval directly, without the LLM, to inspect what would
 > be fed to it: `python -m loglens.rag.retrieve_gold "database deadlock"`.
@@ -356,8 +423,16 @@ reset: `UPDATE bronze_landing SET is_digested = false;` (and optionally
 `TRUNCATE silver_log_entries;`). For a fully clean slate, `docker compose down -v`
 and start from step 2.
 
-**RAG can't reach Ollama.** Confirm Ollama is running and the model is pulled
-(`ollama list`). The first query is slow while the model loads into memory.
+**RAG can't reach Ollama.** Confirm the Ollama service is running and the model
+is pulled (`ollama list` — start it with `ollama serve` or the desktop app). The
+first query is slow while the model loads; if it times out, run it again (the
+model stays warm), or use a smaller model (e.g. `--model llama3.2:3b`).
+
+**A source runs `[OK]` but lands 0 entries.** Ingestion found no matching files,
+or matched files but no entry boundaries. Check the source's `file_prefix`
+matches the actual filenames (Apache files are `access-*.log`, so
+`file_prefix: access`) and that `header_pattern` matches the start of an entry
+for that log type (step 6).
 
 **Cannot connect from Python.** Confirm the container is healthy
 (`docker compose ps`) and that `LOGLENS_DB_DSN` matches the credentials in
