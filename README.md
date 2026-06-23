@@ -155,9 +155,10 @@ Read the full set: **[docs/adr/ADRs.md](docs/adr/ADRs.md)**.
 │   ├── init/            # database init scripts (enables pgvector on first start)
 │   └── schema/          # bronze / silver / gold schema (applied by init_db)
 ├── docs/
-│   ├── SETUP.md         # how to run it, end-to-end
-│   ├── architecture.md  # C4 + Medallion diagrams
-│   └── adr/ADRs.md      # architecture decision records
+│   ├── SETUP.md                 # how to run it, end-to-end
+│   ├── architecture.md          # C4 + Medallion diagrams
+│   ├── production-readiness.md  # SLAs, failure modes, observability, rollout, cost, security
+│   └── adr/ADRs.md              # architecture decision records
 ├── src/loglens/
 │   ├── parsers/         # pluggable parser contract + registry + per-type parsers
 │   ├── pipeline/        # data-building steps: landing_bronze, silver,
@@ -182,6 +183,8 @@ A working end-to-end reference build: heterogeneous logs in, grounded natural-la
 - **Planned:** further log types (HDFS, EVTX, syslog) via new parsers; Power BI dashboards; distributed multi-node execution.
 
 The system was deliberately built as a thin vertical slice first (one log type, all the way through), then generalized — so the extensibility points are real and exercised, not theoretical.
+
+**Operating it in production** — service levels, failure-mode handling, observability, rollout, cost control, and security — is set out in **[docs/production-readiness.md](docs/production-readiness.md)**, distinguishing what the current design already provides from what is deliberately deferred, with the reasoning for each.
 
 ## Test data
 
